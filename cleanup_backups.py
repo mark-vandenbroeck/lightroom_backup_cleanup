@@ -2,11 +2,12 @@ import os
 import shutil
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import smtplib
 import ssl
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import io
 import configparser
 import zipfile
@@ -31,6 +32,7 @@ LANGUAGE = config.get('General', 'language', fallback='en')
 
 KEEP_DAILY_DAYS = config.getint('Retention', 'keep_daily_days', fallback=7)
 KEEP_WEEKLY_DAYS = config.getint('Retention', 'keep_weekly_days', fallback=60)
+MIN_BACKUPS = config.getint('Retention', 'min_backups', fallback=5)
 
 SEND_EMAIL = config.getboolean('Email', 'send_email', fallback=True)
 SMTP_SERVER = config.get('Email', 'smtp_server')
@@ -48,7 +50,7 @@ TRANSLATIONS = {
     'en': {
         'start_cleanup': "Starting cleanup of {}",
         'max_age': "Max age: {} days",
-        'retention_policy': "Retention: keep daily {} days, keep weekly up to {} days",
+        'retention_policy': "Retention: keep daily {} days, keep weekly up to {} days, min backups: {}",
         'dry_run_mode': "Dry run: {}",
         'backup_dir_not_found': "Backup directory not found: {}",
         'critical_error_subject': "Lightroom Backup Cleanup - CRITICAL ERROR",
@@ -66,6 +68,7 @@ TRANSLATIONS = {
         'recent_daily': "Recent daily backup",
         'weekly_retention': "Weekly retention",
         'redundant_weekly': "Redundant weekly backup",
+        'min_backup_limit': "Minimum backup limit (keeping newest {})",
         'successfully_deleted': "Successfully deleted {}",
         'error_deleting': "Error deleting {}: {}",
         'keeping': "KEEPING",
@@ -86,7 +89,7 @@ TRANSLATIONS = {
     'nl': {
         'start_cleanup': "Start opruimen van {}",
         'max_age': "Maximale leeftijd: {} dagen",
-        'retention_policy': "Bewaarbeleid: dagelijks {} dagen, wekelijks tot {} dagen",
+        'retention_policy': "Bewaarbeleid: dagelijks {} dagen, wekelijks tot {} dagen, min backups: {}",
         'dry_run_mode': "Testmodus (Dry run): {}",
         'backup_dir_not_found': "Backup map niet gevonden: {}",
         'critical_error_subject': "Lightroom Backup Opruiming - KRITIEKE FOUT",
@@ -104,6 +107,7 @@ TRANSLATIONS = {
         'recent_daily': "Recente dagelijkse backup",
         'weekly_retention': "Wekelijkse backup",
         'redundant_weekly': "Overtollige wekelijkse backup",
+        'min_backup_limit': "Minimum aantal backups (bewaar nieuwste {})",
         'successfully_deleted': "Succesvol verwijderd {}",
         'error_deleting': "Fout bij verwijderen {}: {}",
         'keeping': "BEWAREN",
@@ -154,15 +158,22 @@ def setup_logging():
     
     return logger, log_capture_string
 
-def send_email(subject, body):
+def send_email(subject, body_text, body_html=None):
     if not SEND_EMAIL:
         print(t('email_disabled'))
         return
 
-    msg = MIMEText(body)
+    msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
     msg['From'] = EMAIL_FROM
     msg['To'] = EMAIL_TO
+
+    part1 = MIMEText(body_text, 'plain')
+    msg.attach(part1)
+    
+    if body_html:
+        part2 = MIMEText(body_html, 'html')
+        msg.attach(part2)
 
     try:
         context = ssl.create_default_context()
@@ -222,12 +233,45 @@ def check_zip_integrity(path, logger):
             return False
     return True
 
+def log_to_html(log_content):
+    lines = log_content.splitlines()
+    html_rows = ""
+    for line in lines:
+        color = "#000000" # Black default
+        bg_color = "transparent"
+        
+        if "ERROR" in line or "CRITICAL" in line or "DELETING" in line or "WOULD DELETE" in line:
+            color = "#D32F2F" # Red
+            bg_color = "#FFEBEE"
+        elif "WARNING" in line:
+            color = "#E65100" # Orange
+            bg_color = "#FFF3E0"
+        elif "KEEPING" in line:
+            color = "#2E7D32" # Green
+        elif "Summary" in line:
+            bg_color = "#F5F5F5"
+            line = f"<b>{line}</b>"
+            
+        html_rows += f"<tr style='background-color:{bg_color};'><td style='color:{color}; padding: 4px 8px; font-family: monospace;'>{line}</td></tr>"
+        
+    html = f"""
+    <html>
+    <body style="font-family: sans-serif;">
+        <h2>Lightroom Backup Cleanup Report</h2>
+        <table style="border-collapse: collapse; width: 100%;">
+            {html_rows}
+        </table>
+    </body>
+    </html>
+    """
+    return html
+
 def cleanup_backups():
     logger, log_capture_string = setup_logging()
     
     logger.info(t('start_cleanup', BACKUP_DIR))
     logger.info(t('max_age', MAX_AGE_DAYS))
-    logger.info(t('retention_policy', KEEP_DAILY_DAYS, KEEP_WEEKLY_DAYS))
+    logger.info(t('retention_policy', KEEP_DAILY_DAYS, KEEP_WEEKLY_DAYS, MIN_BACKUPS))
     logger.info(t('dry_run_mode', DRY_RUN))
     
     if LANGUAGE != 'en':
@@ -239,7 +283,7 @@ def cleanup_backups():
     if not os.path.exists(BACKUP_DIR):
         logger.error(t('backup_dir_not_found', BACKUP_DIR))
         final_log = log_capture_string.getvalue()
-        send_email(t('critical_error_subject'), final_log)
+        send_email(t('critical_error_subject'), final_log, log_to_html(final_log))
         return
 
     # Check Disk Space
@@ -255,7 +299,7 @@ def cleanup_backups():
     except OSError as e:
         logger.error(t('error_accessing_dir', e))
         final_log = log_capture_string.getvalue()
-        send_email(t('error_subject'), final_log)
+        send_email(t('error_subject'), final_log, log_to_html(final_log))
         return
 
     # 1. Parse all backups
@@ -292,15 +336,19 @@ def cleanup_backups():
             critical_error = True
             should_send_report = True
 
-    for backup in backups:
+    for i, backup in enumerate(backups):
         age_days = (now - backup['date']).days
         item = backup['name']
         item_path = backup['path']
         
         action = "KEEP" 
-        reason_key = 'default' # Shouldn't happen
+        reason = "Default"
 
-        if age_days > MAX_AGE_DAYS:
+        # MINIMUM BACKUPS CHECK
+        if i < MIN_BACKUPS:
+             action = "KEEP"
+             reason = t('min_backup_limit', MIN_BACKUPS)
+        elif age_days > MAX_AGE_DAYS:
             action = "DELETE"
             reason = t('older_than', MAX_AGE_DAYS)
         elif age_days <= KEEP_DAILY_DAYS:
@@ -352,7 +400,7 @@ def cleanup_backups():
         
         log_contents = log_capture_string.getvalue()
         subject = t('report_subject', status_suffix)
-        send_email(subject, log_contents)
+        send_email(subject, log_contents, log_to_html(log_contents))
     else:
         logger.info(t('no_report_sent'))
 

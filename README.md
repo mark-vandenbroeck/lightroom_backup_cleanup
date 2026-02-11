@@ -7,10 +7,12 @@ This Python script automates the maintenance of Lightroom backup directories. It
 -   **Smart Retention Policy**:
     -   **0 - 7 days**: Keeps all daily backups.
     -   **7 - 60 days**: Keeps one backup per week (Smart Thinning).
-    -   **> 60 days**: Deletes all backups.
+    -   **> 60 days**: Deletes all backups (unless minimum backup limit is reached).
+    -   **Minimum Backups**: Ensures at least `min_backups` (default 5) are kept, regardless of age.
 -   **Integrity Checks**: Verifies that the `.zip` file within the backup directory is not corrupt.
 -   **Disk Space Monitoring**: Warns if free disk space falls below a configurable threshold (default 10GB).
 -   **Stale Backup Alert**: Sends an alarm if no new backup has been created in the last 31 days.
+-   **HTML Reports**: Sends beautifully formatted HTML table reports via email.
 -   **Conditional Reporting**: Sends email notifications *only* when:
     -   A backup is deleted.
     -   An error occurs (e.g., corrupt zip, disk full).
@@ -40,6 +42,7 @@ This Python script automates the maintenance of Lightroom backup directories. It
     **Key settings**:
     -   `backup_dir`: Path to your backups.
     -   `max_age_days`: Retention limit.
+    -   `min_backups`: Minimum number of backups to keep (safety net).
     -   `dry_run`: Set to `True` for testing, `False` for actual deletion.
     -   `[Email]`: Configure SMTP settings if you want notifications.
 

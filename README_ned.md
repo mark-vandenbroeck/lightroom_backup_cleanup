@@ -7,10 +7,12 @@ Dit Python script automatiseert het onderhoud van je Lightroom backup mappen. He
 -   **Slim Bewaarbeleid (Retention Policy)**:
     -   **0 - 7 dagen**: Bewaart alle dagelijkse backups.
     -   **7 - 60 dagen**: Bewaart één backup per week (Slim uitdunnen).
-    -   **> 60 dagen**: Verwijdert alle backups.
+    -   **> 60 dagen**: Verwijdert alle backups (tenzij minimum aantal backups wordt bereikt).
+    -   **Minimum Aantal Backups**: Bewaart altijd minstens `min_backups` (standaard 5), ongeacht leeftijd.
 -   **Integriteitscontrole**: Controleert of het `.zip` bestand in de backup map niet corrupt is.
 -   **Schijfruimte Monitoring**: Waarschuwt als de vrije schijfruimte onder een instelbare limiet komt (standaard 10GB).
 -   **Alarm "Geen Backup"**: Stuurt een alarm als er in de laatste 31 dagen geen nieuwe backup is gemaakt.
+-   **HTML Rapporten**: Stuurt mooi opgemaakte tabellen via e-mail.
 -   **Conditionele Rapportage**: Stuurt **alleen** e-mailmeldingen wanneer:
     -   Een backup wordt verwijderd.
     -   Er een fout optreedt (bijv. corrupte zip, schijf vol).
@@ -40,6 +42,7 @@ Dit Python script automatiseert het onderhoud van je Lightroom backup mappen. He
     **Belangrijkste instellingen**:
     -   `backup_dir`: Pad naar je backups.
     -   `max_age_days`: Maximale bewaartijd.
+    -   `min_backups`: Minimum aantal te bewaren backups (veiligheidsnet).
     -   `dry_run`: Zet op `True` om te testen, `False` om daadwerkelijk te verwijderen.
     -   `language`: `en` (Engels) of `nl` (Nederlands).
     -   `[Email]`: Configureer SMTP instellingen als je meldingen wilt ontvangen. Zet `send_email = False` om uit te schakelen.
