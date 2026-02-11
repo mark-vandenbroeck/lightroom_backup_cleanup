@@ -240,15 +240,16 @@ def log_to_html(log_content):
         color = "#000000" # Black default
         bg_color = "transparent"
         
-        if "ERROR" in line or "CRITICAL" in line or "DELETING" in line or "WOULD DELETE" in line:
+        # Keywords for English and Dutch
+        if any(x in line for x in ["ERROR", "CRITICAL", "DELETING", "WOULD DELETE", "FOUT", "KRITIEKE", "VERWIJDEREN", "ZOU VERWIJDEREN"]):
             color = "#D32F2F" # Red
             bg_color = "#FFEBEE"
-        elif "WARNING" in line:
+        elif any(x in line for x in ["WARNING", "WAARSCHUWING"]):
             color = "#E65100" # Orange
             bg_color = "#FFF3E0"
-        elif "KEEPING" in line:
+        elif any(x in line for x in ["KEEPING", "BEWAREN"]):
             color = "#2E7D32" # Green
-        elif "Summary" in line:
+        elif any(x in line for x in ["Summary", "Samenvatting"]):
             bg_color = "#F5F5F5"
             line = f"<b>{line}</b>"
             
