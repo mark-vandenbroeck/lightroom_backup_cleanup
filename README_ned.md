@@ -41,6 +41,7 @@ Dit Python script automatiseert het onderhoud van je Lightroom backup mappen. He
     -   `backup_dir`: Pad naar je backups.
     -   `max_age_days`: Maximale bewaartijd.
     -   `dry_run`: Zet op `True` om te testen, `False` om daadwerkelijk te verwijderen.
+    -   `language`: `en` (Engels) of `nl` (Nederlands).
     -   `[Email]`: Configureer SMTP instellingen als je meldingen wilt ontvangen. Zet `send_email = False` om uit te schakelen.
 
 ## Gebruik
