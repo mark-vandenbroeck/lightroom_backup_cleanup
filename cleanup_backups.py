@@ -262,12 +262,21 @@ def ensure_smb_mounted(logger):
         cmd = ['osascript', '-e', f'mount volume "{SMB_URL}"']
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         
-        if os.path.exists(SMB_MOUNT_PATH) and os.path.isdir(SMB_MOUNT_PATH):
-            logger.info(t('smb_mount_success'))
-            return True
-        else:
-            logger.error(t('smb_mount_failed', "Mount path not found after mounting command"))
-            return False
+        # Wait for the mount point to become available and readable (macOS race condition fix)
+        import time
+        for attempt in range(5):
+            time.sleep(1.0)
+            if os.path.exists(SMB_MOUNT_PATH) and os.path.isdir(SMB_MOUNT_PATH):
+                try:
+                    os.listdir(SMB_MOUNT_PATH)
+                    logger.info(t('smb_mount_success'))
+                    return True
+                except OSError:
+                    # Ignore temporary PermissionError or FileNotFoundError while mount registers
+                    pass
+        
+        logger.error(t('smb_mount_failed', "Mount path not accessible or readable after mounting"))
+        return False
     except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
         logger.error(t('smb_mount_failed', str(e)))
         return False
