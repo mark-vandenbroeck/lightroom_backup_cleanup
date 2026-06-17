@@ -18,6 +18,7 @@ This Python script automates the maintenance of Lightroom backup directories. It
     -   An error occurs (e.g., corrupt zip, disk full).
     -   A warning is triggered (e.g., stale backup).
 -   **Detailed Logging**: Maintains a rotating log file (`cleanup_backup.log`) with rotation (max 1MB, 4 files).
+-   **SMB Backup Copy & Retention**: Automatically copies new backups to a remote SMB (Samba) share and applies the same retention cleanup policy to the share. It supports automatic mounting on macOS using `osascript`.
 
 ## Installation
 
@@ -45,6 +46,8 @@ This Python script automates the maintenance of Lightroom backup directories. It
     -   `min_backups`: Minimum number of backups to keep (safety net).
     -   `dry_run`: Set to `True` for testing, `False` for actual deletion.
     -   `[Email]`: Configure SMTP settings if you want notifications.
+    -   `[SMB]`: Configure `enable_smb`, `smb_url`, `smb_mount_path`, and `smb_backup_dir` to copy backups to a Samba network share and apply retention rules there.
+
 
 
 ## Usage
@@ -62,10 +65,10 @@ Check the console output or `cleanup_backup.log` for details.
 ### Automated Execution (Cron)
 
 The script is designed to run automatically via `cron`.
-Example crontab entry (runs daily at 23:00):
+Example crontab entry (runs daily at 22:30):
 
 ```bash
-0 23 * * * /usr/bin/python3 /Users/mark/Documents/Python/Lightroom/cleanup_backup/cleanup_backups.py
+30 22 * * * /usr/bin/python3 /Users/mark/Documents/Python/Lightroom/cleanup_backup/cleanup_backups.py
 ```
 
 To edit your crontab, run `crontab -e` in the terminal.

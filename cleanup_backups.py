@@ -11,6 +11,7 @@ from email.mime.multipart import MIMEMultipart
 import io
 import configparser
 import zipfile
+import subprocess
 
 # Determine script directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +45,12 @@ EMAIL_FROM = config.get('Email', 'email_from')
 
 MIN_FREE_SPACE_GB = config.getfloat('Thresholds', 'min_free_space_gb', fallback=10)
 NO_BACKUP_ALERT_DAYS = config.getint('Thresholds', 'no_backup_alert_days', fallback=31)
+
+# SMB Configuration
+ENABLE_SMB = config.getboolean('SMB', 'enable_smb', fallback=False)
+SMB_URL = config.get('SMB', 'smb_url', fallback='')
+SMB_MOUNT_PATH = config.get('SMB', 'smb_mount_path', fallback='')
+SMB_BACKUP_DIR = config.get('SMB', 'smb_backup_dir', fallback='')
 
 # Translations
 TRANSLATIONS = {
@@ -84,7 +91,18 @@ TRANSLATIONS = {
         'no_report_sent': "No report sent (No changes/errors and no stale backup warning).",
         'email_sent': "Email notification sent successfully.",
         'email_disabled': "Email sending is disabled in config.",
-        'email_failed': "Failed to send email: {}"
+        'email_failed': "Failed to send email: {}",
+        'smb_check_mount': "Checking if SMB share is mounted at {}",
+        'smb_not_mounted': "SMB share is not mounted. Attempting to mount {}...",
+        'smb_mount_success': "SMB share successfully mounted.",
+        'smb_mount_failed': "Failed to mount SMB share: {}",
+        'smb_start_copy': "Copying {} to SMB share...",
+        'smb_would_copy': "WOULD COPY {} to SMB share",
+        'smb_copy_success': "Successfully copied {} to SMB share.",
+        'smb_copy_failed': "Failed to copy {} to SMB share: {}",
+        'smb_copy_skipped': "Backup {} already exists on SMB share. Skipping copy.",
+        'smb_start_cleanup': "Starting cleanup of SMB backup directory {}",
+        'smb_disabled': "SMB copying is disabled."
     },
     'nl': {
         'start_cleanup': "Start opruimen van {}",
@@ -123,7 +141,18 @@ TRANSLATIONS = {
         'no_report_sent': "Geen rapport verzonden (Geen wijzigingen/fouten en geen waarschuwingen).",
         'email_sent': "E-mailmelding succesvol verzonden.",
         'email_disabled': "E-mail verzenden is uitgeschakeld in configuratie.",
-        'email_failed': "Kon e-mail niet verzenden: {}"
+        'email_failed': "Kon e-mail niet verzenden: {}",
+        'smb_check_mount': "Controleren of SMB-share is gekoppeld op {}",
+        'smb_not_mounted': "SMB-share is niet gekoppeld. Poging tot koppelen van {}...",
+        'smb_mount_success': "SMB-share succesvol gekoppeld.",
+        'smb_mount_failed': "Koppelen van SMB-share mislukt: {}",
+        'smb_start_copy': "Kopiëren van {} naar SMB-share...",
+        'smb_would_copy': "ZOU {} KOPIËREN naar SMB-share",
+        'smb_copy_success': "Succesvol {} gekopieerd naar SMB-share.",
+        'smb_copy_failed': "Kopiëren van {} naar SMB-share mislukt: {}",
+        'smb_copy_skipped': "Backup {} bestaat al op de SMB-share. Kopiëren overgeslagen.",
+        'smb_start_cleanup': "Start opruimen van SMB-backupmap {}",
+        'smb_disabled': "Kopiëren naar SMB is uitgeschakeld."
     }
 }
 
@@ -214,6 +243,207 @@ def check_disk_space(logger):
         logger.error(t('error_checking_disk', e))
         return False
 
+def ensure_smb_mounted(logger):
+    """Ensures the SMB share is mounted. If not, attempts to mount it."""
+    if not ENABLE_SMB:
+        return True
+    
+    logger.info(t('smb_check_mount', SMB_MOUNT_PATH))
+    if os.path.exists(SMB_MOUNT_PATH) and os.path.isdir(SMB_MOUNT_PATH):
+        try:
+            # Check if directory is readable and listable
+            os.listdir(SMB_MOUNT_PATH)
+            return True
+        except OSError:
+            pass
+
+    logger.warning(t('smb_not_mounted', SMB_URL))
+    try:
+        cmd = ['osascript', '-e', f'mount volume "{SMB_URL}"']
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        
+        if os.path.exists(SMB_MOUNT_PATH) and os.path.isdir(SMB_MOUNT_PATH):
+            logger.info(t('smb_mount_success'))
+            return True
+        else:
+            logger.error(t('smb_mount_failed', "Mount path not found after mounting command"))
+            return False
+    except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
+        logger.error(t('smb_mount_failed', str(e)))
+        return False
+
+def copy_new_backups_to_smb(local_backups, logger):
+    """Copies any new local backups to the SMB target directory if not already present."""
+    if not ENABLE_SMB:
+        return True, False
+    
+    if not ensure_smb_mounted(logger):
+        return False, False
+        
+    if not os.path.exists(SMB_BACKUP_DIR):
+        try:
+            if not DRY_RUN:
+                os.makedirs(SMB_BACKUP_DIR, exist_ok=True)
+            else:
+                logger.info(f"[DRY RUN] Would create SMB backup directory: {SMB_BACKUP_DIR}")
+        except OSError as e:
+            logger.error(f"Failed to create SMB backup directory {SMB_BACKUP_DIR}: {e}")
+            return False, False
+
+    # Get list of existing backups on SMB
+    smb_backups = []
+    try:
+        if os.path.exists(SMB_BACKUP_DIR):
+            items = os.listdir(SMB_BACKUP_DIR)
+            for item in items:
+                item_path = os.path.join(SMB_BACKUP_DIR, item)
+                if not os.path.isdir(item_path):
+                    continue
+                backup_date = parse_backup_date(item)
+                if backup_date:
+                    smb_backups.append(item)
+    except OSError as e:
+        logger.error(f"Error accessing SMB backup directory {SMB_BACKUP_DIR}: {e}")
+        return False, False
+
+    # Convert list of SMB backup names to a set for fast lookup
+    smb_backups_set = set(smb_backups)
+    
+    any_copied = False
+    success = True
+    
+    # Iterate local backups (from oldest to newest, so we copy in chronological order)
+    for backup in reversed(local_backups):
+        name = backup['name']
+        local_path = backup['path']
+        smb_path = os.path.join(SMB_BACKUP_DIR, name)
+        
+        if name in smb_backups_set:
+            logger.info(t('smb_copy_skipped', name))
+            continue
+            
+        if DRY_RUN:
+            logger.info(f"[{t('smb_would_copy', name)}]")
+            any_copied = True
+        else:
+            logger.info(t('smb_start_copy', name))
+            try:
+                # Use shutil.copytree to copy the entire backup directory
+                shutil.copytree(local_path, smb_path)
+                logger.info(t('smb_copy_success', name))
+                any_copied = True
+            except Exception as e:
+                logger.error(t('smb_copy_failed', name, e))
+                success = False
+
+    return success, any_copied
+
+def run_retention_cleanup(target_dir, dir_label, logger, check_integrity=True):
+    """Applies the retention policy to clean up old backups in the specified directory."""
+    logger.info(f"--- {t('start_cleanup', f'{dir_label} ({target_dir})')} ---")
+    logger.info(t('max_age', MAX_AGE_DAYS))
+    logger.info(t('retention_policy', KEEP_DAILY_DAYS, KEEP_WEEKLY_DAYS, MIN_BACKUPS))
+    
+    if not os.path.exists(target_dir):
+        logger.error(t('backup_dir_not_found', target_dir))
+        return False, 0, 0, False
+
+    try:
+        items = os.listdir(target_dir)
+    except OSError as e:
+        logger.error(t('error_accessing_dir', e))
+        return False, 0, 0, False
+
+    backups = []
+    for item in items:
+        item_path = os.path.join(target_dir, item)
+        if not os.path.isdir(item_path):
+            continue
+        backup_date = parse_backup_date(item)
+        if backup_date:
+            backups.append({'path': item_path, 'name': item, 'date': backup_date})
+
+    # Sort backups by date (newest first)
+    backups.sort(key=lambda x: x['date'], reverse=True)
+
+    if not backups:
+        logger.error(t('no_backups_found', target_dir))
+        return True, 0, 0, True # Return success=True, but has_alert=True
+
+    now = datetime.now()
+    has_recent_backup_alert = False
+    if (now - backups[0]['date']).days > NO_BACKUP_ALERT_DAYS:
+        logger.error(t('no_recent_backup', (now - backups[0]['date']).days, backups[0]['name']))
+        has_recent_backup_alert = True
+
+    # Check zip integrity of the NEWEST backup
+    zip_integrity_fail = False
+    if backups and check_integrity:
+        if not check_zip_integrity(backups[0]['path'], logger):
+            zip_integrity_fail = True
+
+    weekly_buckets = set()
+    deleted_count = 0
+    kept_count = 0
+    any_deleted_or_error = zip_integrity_fail or has_recent_backup_alert
+
+    for i, backup in enumerate(backups):
+        age_days = (now - backup['date']).days
+        item = backup['name']
+        item_path = backup['path']
+        
+        action = "KEEP" 
+        reason = "Default"
+
+        # MINIMUM BACKUPS CHECK
+        if i < MIN_BACKUPS:
+             action = "KEEP"
+             reason = t('min_backup_limit', MIN_BACKUPS)
+        elif age_days > MAX_AGE_DAYS:
+            action = "DELETE"
+            reason = t('older_than', MAX_AGE_DAYS)
+        elif age_days <= KEEP_DAILY_DAYS:
+            action = "KEEP"
+            reason = t('recent_daily')
+        else:
+            year_week = backup['date'].isocalendar()[:2] 
+            if year_week not in weekly_buckets:
+                action = "KEEP"
+                reason = t('weekly_retention')
+                weekly_buckets.add(year_week)
+            else:
+                action = "DELETE"
+                reason = t('redundant_weekly')
+
+        if action == "DELETE":
+            log_action = t('would_delete') if DRY_RUN else t('deleting')
+            logger.info(f"[{log_action}] {item} (Age: {age_days} days) - {reason}")
+            any_deleted_or_error = True
+            
+            if not DRY_RUN:
+                try:
+                    shutil.rmtree(item_path)
+                    logger.info(t('successfully_deleted', item))
+                    deleted_count += 1
+                except Exception as e:
+                    logger.error(t('error_deleting', item, e))
+                    any_deleted_or_error = True
+            else:
+                deleted_count += 1
+        else:
+            logger.info(f"[{t('keeping')}]      {item} (Age: {age_days} days) - {reason}")
+            kept_count += 1
+
+    logger.info(t('summary'))
+    logger.info(t('total_checked', len(backups)))
+    logger.info(t('to_delete', deleted_count))
+    logger.info(t('kept', kept_count))
+    
+    if DRY_RUN and deleted_count > 0:
+        logger.info(t('review_output'))
+
+    return True, deleted_count, kept_count, any_deleted_or_error
+
 def check_zip_integrity(path, logger):
     """Checks if the zip file inside the directory is valid."""
     zips = [f for f in os.listdir(path) if f.endswith('.zip')]
@@ -292,106 +522,54 @@ def cleanup_backups():
         critical_error = True
         should_send_report = True
 
-    now = datetime.now()
-    backups = []
-
+    # 1. Parse all local backups
+    local_backups = []
     try:
         items = os.listdir(BACKUP_DIR)
+        for item in items:
+            item_path = os.path.join(BACKUP_DIR, item)
+            if not os.path.isdir(item_path):
+                continue
+            backup_date = parse_backup_date(item)
+            if backup_date:
+                local_backups.append({'path': item_path, 'name': item, 'date': backup_date})
     except OSError as e:
         logger.error(t('error_accessing_dir', e))
         final_log = log_capture_string.getvalue()
         send_email(t('error_subject'), final_log, log_to_html(final_log))
         return
 
-    # 1. Parse all backups
-    for item in items:
-        item_path = os.path.join(BACKUP_DIR, item)
-        if not os.path.isdir(item_path):
-            continue
-        backup_date = parse_backup_date(item)
-        if backup_date:
-            backups.append({'path': item_path, 'name': item, 'date': backup_date})
+    # Sort local backups (newest first)
+    local_backups.sort(key=lambda x: x['date'], reverse=True)
 
-    # Sort backups by date (newest first)
-    backups.sort(key=lambda x: x['date'], reverse=True)
-
-    # Check for "No Backup" Alert
-    if not backups:
-        logger.error(t('no_backups_found', BACKUP_DIR))
-        critical_error = True
-        should_send_report = True
-    elif (now - backups[0]['date']).days > NO_BACKUP_ALERT_DAYS:
-        logger.error(t('no_recent_backup', (now - backups[0]['date']).days, backups[0]['name']))
-        critical_error = True
-        should_send_report = True
-
-    # 2. Determine action for each backup
-    weekly_buckets = set() 
-
-    deleted_count = 0
-    kept_count = 0
-    
-    # Check integrity of the NEWEST backup always
-    if backups:
-        if not check_zip_integrity(backups[0]['path'], logger):
+    # 2. Copy new backups to SMB if enabled
+    if ENABLE_SMB:
+        logger.info("--- SMB Backup Copy Step ---")
+        copy_success, any_copied = copy_new_backups_to_smb(local_backups, logger)
+        if not copy_success:
             critical_error = True
             should_send_report = True
+        if any_copied:
+            should_send_report = True
+    else:
+        logger.info(t('smb_disabled'))
 
-    for i, backup in enumerate(backups):
-        age_days = (now - backup['date']).days
-        item = backup['name']
-        item_path = backup['path']
-        
-        action = "KEEP" 
-        reason = "Default"
+    # 3. Clean up local backups
+    local_ok, local_deleted, local_kept, local_alert = run_retention_cleanup(BACKUP_DIR, "Local", logger, check_integrity=True)
+    if not local_ok:
+        critical_error = True
+        should_send_report = True
+    if local_alert or local_deleted > 0:
+        should_send_report = True
 
-        # MINIMUM BACKUPS CHECK
-        if i < MIN_BACKUPS:
-             action = "KEEP"
-             reason = t('min_backup_limit', MIN_BACKUPS)
-        elif age_days > MAX_AGE_DAYS:
-            action = "DELETE"
-            reason = t('older_than', MAX_AGE_DAYS)
-        elif age_days <= KEEP_DAILY_DAYS:
-            action = "KEEP"
-            reason = t('recent_daily')
-        else:
-            year_week = backup['date'].isocalendar()[:2] 
-            if year_week not in weekly_buckets:
-                action = "KEEP"
-                reason = t('weekly_retention')
-                weekly_buckets.add(year_week)
-            else:
-                action = "DELETE"
-                reason = t('redundant_weekly')
-
-        if action == "DELETE":
-            log_action = t('would_delete') if DRY_RUN else t('deleting')
-            logger.info(f"[{log_action}] {item} (Age: {age_days} days) - {reason}")
-            should_send_report = True 
-            
-            if not DRY_RUN:
-                try:
-                    shutil.rmtree(item_path)
-                    logger.info(t('successfully_deleted', item))
-                    deleted_count += 1
-                except Exception as e:
-                    logger.error(t('error_deleting', item, e))
-                    should_send_report = True
-                    critical_error = True
-            else:
-                deleted_count += 1
-        else:
-            logger.info(f"[{t('keeping')}]      {item} (Age: {age_days} days) - {reason}")
-            kept_count += 1
-
-    logger.info(t('summary'))
-    logger.info(t('total_checked', len(backups)))
-    logger.info(t('to_delete', deleted_count))
-    logger.info(t('kept', kept_count))
-    
-    if DRY_RUN and deleted_count > 0:
-        logger.info(t('review_output'))
+    # 4. Clean up SMB backups if enabled
+    if ENABLE_SMB and (os.path.exists(SMB_MOUNT_PATH) and os.path.isdir(SMB_MOUNT_PATH)):
+        smb_ok, smb_deleted, smb_kept, smb_alert = run_retention_cleanup(SMB_BACKUP_DIR, "SMB", logger, check_integrity=False)
+        if not smb_ok:
+            critical_error = True
+            should_send_report = True
+        if smb_alert or smb_deleted > 0:
+            should_send_report = True
 
     # Send Email Report if necessary
     if should_send_report or critical_error:

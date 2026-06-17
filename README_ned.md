@@ -18,6 +18,7 @@ Dit Python script automatiseert het onderhoud van je Lightroom backup mappen. He
     -   Er een fout optreedt (bijv. corrupte zip, schijf vol).
     -   Er een waarschuwing is (bijv. geen recente backup).
 -   **Gedetailleerde Logging**: Houdt een roterend logbestand bij (`cleanup_backup.log`) (max 1MB, 4 bestanden).
+-   **SMB Backup Kopie & Retentie**: Kopieert nieuwe backups automatisch naar een externe SMB (Samba) share en past daar hetzelfde bewaarbeleid op toe. Ondersteunt automatische koppeling (mounting) op macOS via `osascript`.
 
 ## Installatie
 
@@ -46,6 +47,8 @@ Dit Python script automatiseert het onderhoud van je Lightroom backup mappen. He
     -   `dry_run`: Zet op `True` om te testen, `False` om daadwerkelijk te verwijderen.
     -   `language`: `en` (Engels) of `nl` (Nederlands).
     -   `[Email]`: Configureer SMTP instellingen als je meldingen wilt ontvangen. Zet `send_email = False` om uit te schakelen.
+    -   `[SMB]`: Configureer `enable_smb`, `smb_url`, `smb_mount_path` en `smb_backup_dir` om backups naar een Samba-netwerkmap te kopiëren en daar opruimregels op toe te passen.
+
 
 ## Gebruik
 
@@ -62,10 +65,10 @@ Controleer de terminal uitvoer of `cleanup_backup.log` voor details.
 ### Geautomatiseerde Uitvoer (Cron)
 
 Het script is ontworpen om automatisch via `cron` te draaien.
-Voorbeeld crontab regel (draait dagelijks om 23:00):
+Voorbeeld crontab regel (draait dagelijks om 22:30):
 
 ```bash
-0 23 * * * /usr/bin/python3 /Users/mark/Documents/Python/Lightroom/cleanup_backup/cleanup_backups.py
+30 22 * * * /usr/bin/python3 /Users/mark/Documents/Python/Lightroom/cleanup_backup/cleanup_backups.py
 ```
 
 Om je crontab te bewerken, typ `crontab -e` in de terminal.
